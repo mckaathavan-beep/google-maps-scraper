@@ -1,0 +1,139 @@
+name: Chennai Business Leads
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  collect-leads:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Collect public business listings
+        run: |
+          cat > scraper.py <<'PY'
+          import requests
+          import csv
+          import time
+
+          headers = {
+              "User-Agent": "ChennaiBusinessResearch/1.0"
+          }
+
+          places = [
+              "Pallavaram, Chennai, India",
+              "Tambaram, Chennai, India",
+              "Chromepet, Chennai, India"
+          ]
+
+          results = {}
+          overpass = "https://overpass-api.de/api/interpreter"
+
+          for place in places:
+              print("Searching:", place)
+
+              geo = requests.get(
+                  "https://nominatim.openstreetmap.org/search",
+                  params={"q": place, "format": "json", "limit": 1},
+                  headers=headers,
+                  timeout=30
+              )
+              geo.raise_for_status()
+              locations = geo.json()
+
+              if not locations:
+                  print("Location not found:", place)
+                  continue
+
+              lat = float(locations[0]["lat"])
+              lon = float(locations[0]["lon"])
+
+              query = f"""
+              [out:json][timeout:60];
+              (
+                nwr(around:5000,{lat},{lon})
+                  ["amenity"~"^(school|college|university|language_school|music_school|clinic|dentist|doctors)$"];
+                nwr(around:5000,{lat},{lon})
+                  ["office"="educational_institution"];
+              );
+              out center tags;
+              """
+
+              response = requests.post(
+                  overpass,
+                  data={"data": query},
+                  headers=headers,
+                  timeout=120
+              )
+              response.raise_for_status()
+
+              for item in response.json().get("elements", []):
+                  tags = item.get("tags", {})
+                  name = tags.get("name")
+
+                  if not name:
+                      continue
+
+                  center = item.get("center", {})
+                  latitude = item.get("lat", center.get("lat", ""))
+                  longitude = item.get("lon", center.get("lon", ""))
+
+                  address = ", ".join(filter(None, [
+                      tags.get("addr:housenumber"),
+                      tags.get("addr:street"),
+                      tags.get("addr:suburb"),
+                      tags.get("addr:city")
+                  ]))
+
+                  category = (
+                      tags.get("amenity")
+                      or tags.get("office")
+                      or "business"
+                  )
+
+                  results[(item["type"], item["id"])] = {
+                      "Business": name,
+                      "Category": category,
+                      "Address": address,
+                      "Phone": tags.get("phone") or tags.get("contact:phone", ""),
+                      "Website": tags.get("website") or tags.get("contact:website", ""),
+                      "Latitude": latitude,
+                      "Longitude": longitude,
+                      "Search Area": place,
+                      "Source": "OpenStreetMap"
+                  }
+
+              time.sleep(2)
+
+          with open("chennai_leads.csv", "w", newline="", encoding="utf-8-sig") as f:
+              fields = [
+                  "Business", "Category", "Address", "Phone",
+                  "Website", "Latitude", "Longitude",
+                  "Search Area", "Source"
+              ]
+              writer = csv.DictWriter(f, fieldnames=fields)
+              writer.writeheader()
+              writer.writerows(results.values())
+
+          print("Total listings:", len(results))
+          PY
+
+          python scraper.py
+
+      - name: Save CSV results
+        uses: actions/upload-artifact@v4
+        with:
+          name: chennai-business-leads
+          path: chennai_leads.csv
+          if-no-files-found: error
+          retention-days: 7
